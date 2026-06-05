@@ -678,6 +678,208 @@ async def continuous_monitor():
 
 ---
 
+## Level 5: SPI Hardware Integration with RAM Drive Queue (Production System)
+
+### Files
+- **Server**: `8server_minimal_tcp_ip.py`
+- **Client**: `8client_minimal_tcp_ip.py`
+
+### What It Does
+
+Integrates the **entire end-to-end system**:
+1. **Hardware**: SPI loopback (or real SPI device) captures data
+2. **Local Storage**: Data written to RAM drive (`/mnt/dlog_ramdisk/`) by SPI capture script
+3. **Server**: TCP/IP server monitors RAM drive, sends files on client request
+4. **Client**: Continuously polls, receives binary data, persists to local archive
+
+This is the **complete production system** combining:
+- SPI high-speed data acquisition (10–50 MHz)
+- RAM drive queuing (16 MB buffer)
+- TCP/IP FIFO transfer with auto-cleanup
+- Proper binary data handling (no string conversions)
+
+### Server Integration with SPI RAM Drive
+
+**Key Change: Read from RAM drive instead of generating dummy data**
+
+```python
+import glob
+import os
+
+ramdisk_path = "/mnt/dlog_ramdisk/"
+
+# In command_handler():
+if cmd == "GET_LOG?":
+    answer = f"SENDING DATALOG  time:{timestr}\n"
+    sock.sendall(answer.encode())
+    
+    # Search RAM drive for SPI-captured files
+    search_pattern = f"{ramdisk_path}*.log"
+    log_files = sorted(glob.glob(search_pattern))
+    
+    if log_files:
+        log_file = log_files[0]  # Oldest SPI file first (FIFO)
+        with open(log_file, 'rb') as f:
+            log_file_data = f.read()
+        
+        sock.sendall(log_file_data + b"\n")
+        os.remove(log_file)  # Delete after successful send
+        print(f"sent and deleted {log_file}")
+    else:
+        answer = "no new data found\n"
+        sock.sendall(answer.encode())
+```
+
+### Client: Proper Binary Data Handling
+
+**Critical Fix: Use `read_raw()` instead of `read()` for binary data**
+
+```python
+# Query for log availability
+response_header = inst.query('GET_LOG?')
+print(f"recieved: {response_header}")
+
+# Read binary data WITHOUT ASCII decoding
+datalog = inst.read_raw()  # ← CRITICAL: not read()
+
+print(f"recieved log size {len(datalog)} bytes")
+
+# Append to persistent archive
+with open('dump_log.log', 'ab') as f:  # 'ab' = append binary
+    f.write(response_header.encode() + datalog)
+```
+
+**Why `read_raw()`?**
+- `read()` tries to decode response as ASCII text → fails on binary data (0xAA, 0x55, etc.)
+- `read_raw()` returns bytes directly → correct for binary SPI data
+
+### Data Flow Diagram
+
+```
+SPI Hardware (10 MHz)
+      │
+      ├─→ [4 KB per loop] ─→ Accumulate
+      │
+      ├─→ [2 MB buffer full]
+      │
+      ├─→ Write to RAM drive
+      │
+      └─→ /mnt/dlog_ramdisk/dlog_260605_150804.log (2.0 MB)
+                    │
+                    │ (Server monitors via glob.glob())
+                    │
+                    ├─→ Client: GET_LOG?
+                    │
+                    ├─→ Server: sendall(file + b"\n")
+                    │
+                    ├─→ Client: read_raw() → binary data
+                    │
+                    ├─→ Client: append to dump_log.log
+                    │
+                    └─→ Server: os.remove() → CLEANUP
+```
+
+### Integration Requirements
+
+**On Raspberry Pi:**
+1. SPI loopback script (File 7) writing to `/mnt/dlog_ramdisk/`
+2. TCP/IP server (File 8) running and monitoring RAM drive
+3. RAM drive persistent: `/mnt/dlog_ramdisk` mounted via `/etc/fstab`
+
+**On Main System:**
+1. PyVISA client (File 8) connecting to `raspi.local:5025`
+2. `read_raw()` for binary data (not `read()`)
+3. Append-binary mode for file writes (`'ab'`)
+
+### Real-World Performance
+
+**Example Run:**
+
+Server console:
+```
+[*] Server running on 0.0.0.0:5025
+[CONNECT] ('192.168.1.100', 54321)
+RECIEVED IDN?
+RECIEVED GET_LOG?
+Sending /mnt/dlog_ramdisk/dlog_260605_150804.log...
+sent and deleted /mnt/dlog_ramdisk/dlog_260605_150804.log
+RECIEVED GET_LOG?
+Sending /mnt/dlog_ramdisk/dlog_260605_150805.log...
+sent and deleted /mnt/dlog_ramdisk/dlog_260605_150805.log
+```
+
+Client console:
+```
+RESPONSE to IDN? - I am PI  time:260605_150804
+recieved: SENDING DATALOG  time:260605_150804
+recieved log size 2097152 bytes
+
+recieved: SENDING DATALOG  time:260605_150805
+recieved log size 2097152 bytes
+```
+
+Persistent archive:
+```bash
+ls -lh dump_log.log
+-rw-r--r-- 1 user group 4.1M Jun 05 15:08 dump_log.log
+# (2.0 MB file 1 + header + 2.0 MB file 2 + header = 4.1 MB total)
+```
+
+### End-to-End Test Sequence
+
+**Terminal 1 (Pi - SPI Capture):**
+```bash
+python3 7spi_tst_python.py
+# Creates /mnt/dlog_ramdisk/dlog_*.log files at 2 MB intervals
+```
+
+**Terminal 2 (Pi - TCP/IP Server):**
+```bash
+python3 8server_minimal_tcp_ip.py
+# Monitors /mnt/dlog_ramdisk/ for new files
+# Sends on client request, deletes after send
+```
+
+**Terminal 3 (Main System - TCP/IP Client):**
+```bash
+python3 8client_minimal_tcp_ip.py
+# Polls every 250 ms for GET_LOG?
+# Receives binary data, appends to dump_log.log
+```
+
+### Key Improvements Over Level 4
+
+| Feature | Level 4 | Level 5 |
+|---------|---------|---------|
+| Data source | Dummy data (1 MB blocks) | Real SPI hardware (2 MB files) |
+| Storage | Current directory | RAM drive (`/mnt/dlog_ramdisk/`) |
+| Client handling | `read()` (ASCII) | `read_raw()` (binary) ✓ |
+| Binary safety | String concatenation bug | Proper `bytes` buffer |
+| Real device | ❌ Simulation | ✓ SPI loopback or real device |
+| Production-ready | ✓ Queuing logic | ✓ Complete hardware integration |
+
+### Common Issues & Fixes
+
+**UnicodeDecodeError: 'ascii' codec can't decode byte 0xaa**
+```python
+# WRONG:
+datalog = inst.read()
+
+# CORRECT:
+datalog = inst.read_raw()
+```
+
+**Waiting for logs... (no files found)**
+- Verify SPI capture script is running: `python3 7spi_tst_python.py`
+- Check RAM drive has files: `ls -lh /mnt/dlog_ramdisk/`
+- Check path in server: `ramdisk_path = "/mnt/dlog_ramdisk/"`
+
+**"No space left on device" during SPI capture**
+- Increase RAM drive size or copy files out during capture
+- Ensure TCP/IP server is deleting files after transfer
+
+---
+
 ## Summary
 
 | Level | Purpose | Key Feature | Use Case |
@@ -686,6 +888,7 @@ async def continuous_monitor():
 | **2** | Command protocol | Newline-delimited parsing, PyVISA | Instrument integration |
 | **3** | Large data transfer | Binary streaming, performance testing | Single-shot high-speed transfer |
 | **4** | **Real-Time Production Queue** | **FIFO auto-cleanup, dynamic queue depth, continuous polling** | **Live data logging, indefinite operation** |
+| **5** | **Hardware Integration** | **SPI + RAM drive + TCP/IP, binary-safe client, complete system** | **Production semiconductor ATE, real-time data pipeline** |
 
 ---
 
@@ -709,11 +912,12 @@ These examples were developed for **real-time semiconductor test data transfer**
 This project implements **dynamic real-time operation**: logs flow through the system, are processed, and cleaned up automatically—designed for indefinite sustained operation where producer (hardware) and consumer (client) operate at potentially different rates.
 
 ### Deployment Progression
-The progression from Level 1→4 mirrors real-world deployment:
+The progression from Level 1→5 mirrors real-world deployment:
 - **Level 1**: Proof-of-concept (can I connect?)
 - **Level 2**: Integration with existing VISA instruments (does the protocol work?)
 - **Level 3**: Performance validation (how fast can data flow?)
 - **Level 4**: Continuous production monitoring (can it sustain operation indefinitely?)
+- **Level 5**: Hardware integration (can I stream real SPI data end-to-end?)
 
 ### Design Principles
 - **Minimal dependencies** (Python stdlib only on server) for maximum portability on resource-constrained SBCs

@@ -520,6 +520,94 @@ ls -lh dump_log.log
 
 ---
 
+## Level 5: SPI Hardware Integration with RAM Drive Queue (Production System)
+
+### Files
+- **Server**: `8server_minimal_tcp_ip.py`
+- **Client**: `8client_minimal_tcp_ip.py`
+- **SPI Capture**: `7spi_tst_python.py` (companion script, see SPI_LOOPBACK_RAMDRIVE_GUIDE.md)
+
+### What It Does
+
+Integrates the **complete end-to-end system** with real hardware:
+
+1. **Hardware**: SPI loopback (or real SPI device) captures data at 10–50 MHz
+2. **Local Storage**: Data written to RAM drive (`/mnt/dlog_ramdisk/`) in 2 MB files
+3. **Server**: TCP/IP server monitors RAM drive, sends files on client request (FIFO order)
+4. **Client**: Continuously polls, receives binary data with `read_raw()`, persists to archive
+
+**Key Difference from Level 4**: Data comes from **real SPI hardware**, not dummy generation.
+
+### RAM Drive Setup (Required)
+
+```bash
+# Create 16 MB RAM drive
+sudo mkdir -p /mnt/dlog_ramdisk
+sudo mount -t tmpfs -o size=16M tmpfs /mnt/dlog_ramdisk
+
+# Make permanent: add to /etc/fstab
+tmpfs /mnt/dlog_ramdisk tmpfs size=16M 0 0
+
+# Verify
+df -h /mnt/dlog_ramdisk
+```
+
+### Critical Fix: Binary Data Handling
+
+**Client must use `read_raw()` instead of `read()`:**
+
+```python
+# WRONG: Fails on binary data with UnicodeDecodeError
+datalog = inst.read()
+
+# CORRECT: Returns bytes directly for binary SPI data
+datalog = inst.read_raw()
+
+# Append to persistent archive
+with open('dump_log.log', 'ab') as f:  # 'ab' = append binary
+    f.write(response_header.encode() + datalog)
+```
+
+### End-to-End System (3 Terminals)
+
+**Terminal 1 (Pi - SPI Data Capture):**
+```bash
+python3 7spi_tst_python.py
+# Captures SPI data, writes 2 MB files to /mnt/dlog_ramdisk/
+```
+
+**Terminal 2 (Pi - TCP/IP Server):**
+```bash
+python3 8server_minimal_tcp_ip.py
+# Monitors RAM drive, sends files on GET_LOG?, auto-deletes
+```
+
+**Terminal 3 (Main System - TCP/IP Client):**
+```bash
+python3 8client_minimal_tcp_ip.py
+# Polls every 250 ms, receives binary data, appends to dump_log.log
+```
+
+### Performance Characteristics
+
+| Metric | Value |
+|--------|-------|
+| SPI Clock Speed | 10 MHz (tested), up to 50 MHz (loopback) |
+| SPI Throughput | ~10 MB/s |
+| File Size | 2 MB per file (auto-rotation) |
+| RAM Drive Capacity | 16 MB total (8 files max) |
+| TCP Transfer Rate | 21–22 MB/s (Gigabit Ethernet) |
+| Command Latency | 10–50 ms |
+| Log Delivery Latency | ~1 polling interval (250 ms) |
+
+### See Also
+
+For complete SPI setup and testing details, see:
+- **SPI_LOOPBACK_RAMDRIVE_GUIDE.md** — Hardware setup, loopback wiring, speed testing, RAM drive management
+- **TCP_IP_DATA_TRANSFER_GUIDE.md** — Complete Level 1–5 documentation with all code examples
+
+---
+
 ## Practical Integration Examples
 
 ### With PyVISA for Instrument Compatibility
@@ -688,6 +776,7 @@ async def continuous_monitor():
 | **2** | Command protocol | Newline-delimited parsing, PyVISA | Instrument integration |
 | **3** | Large data transfer | Binary streaming, performance testing | Single-shot high-speed transfer |
 | **4** | **Real-Time Production Queue** | **FIFO auto-cleanup, dynamic queue depth, continuous polling** | **Live data logging, indefinite operation** |
+| **5** | **Hardware Integration** | **SPI + RAM drive + TCP/IP, binary-safe client, complete system** | **Production semiconductor ATE, real-time data pipeline** |
 
 ---
 
@@ -711,11 +800,12 @@ These examples were developed for **real-time semiconductor test data transfer**
 This project implements **dynamic real-time operation**: logs flow through the system, are processed, and cleaned up automatically—designed for indefinite sustained operation where producer (hardware) and consumer (client) operate at potentially different rates.
 
 ### Deployment Progression
-The progression from Level 1→4 mirrors real-world deployment:
+The progression from Level 1→5 mirrors real-world deployment:
 - **Level 1**: Proof-of-concept (can I connect?)
 - **Level 2**: Integration with existing VISA instruments (does the protocol work?)
 - **Level 3**: Performance validation (how fast can data flow?)
 - **Level 4**: Continuous production monitoring (can it sustain operation indefinitely?)
+- **Level 5**: Hardware integration (can I stream real SPI data end-to-end?)
 
 ### Design Principles
 - **Minimal dependencies** (Python stdlib only on server) for maximum portability on resource-constrained SBCs
