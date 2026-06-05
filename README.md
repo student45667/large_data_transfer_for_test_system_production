@@ -1,14 +1,15 @@
-# TCP/IP High-Speed Data Transfer System: PI SBC to Data Acquisition Station
+# TCP/IP Real-Time High-Speed Data Transfer System: PI SBC to Data Acquisition Station
 
 ## Project Overview
 
-This project demonstrates a **Raspberry Pi-based server** collecting high-speed asynchronous data logs and transferring them reliably to a **main data acquisition/analysis system** over TCP/IP. The implementation evolves through four complexity levels, from basic socket communication to robust multi-file queue management.
+This project demonstrates a **Raspberry Pi-based server** collecting **real-time asynchronous data logs** and transferring them reliably to a **main data acquisition/analysis system** over TCP/IP. Logs are **dynamically created**, **queued**, **streamed**, and **automatically removed** as they flow through the system. The implementation evolves through four complexity levels, from basic socket communication to robust multi-file queue management for continuous live operation.
 
-### Purpose
-- Remote data collection on a resource-constrained SBC (Raspberry Pi)
-- High-speed binary data transfer over TCP/IP
-- VISA-compliant client interface (compatible with oscilloscopes, VNAs, test instruments)
-- Reliable command-response protocol with proper buffering and flow control
+### Purpose: Real-Time Dynamic Logging
+- **Live data collection** on a resource-constrained SBC (Raspberry Pi) — logs created in real-time by hardware/sensors
+- **Continuous queue management** — logs auto-deleted after successful transfer (FIFO cleanup)
+- **High-speed binary streaming** over TCP/IP — keeping up with asynchronous data generation
+- **VISA-compliant client interface** (compatible with oscilloscopes, VNAs, test instruments)
+- **Reliable command-response protocol** with proper buffering and flow control for sustained operation
 
 ### System Architecture
 ```
@@ -29,6 +30,49 @@ This project demonstrates a **Raspberry Pi-based server** collecting high-speed 
 │  - Command Interpreter       │
 └──────────────────────────────┘
 ```
+
+---
+
+## Real-Time Dynamic Logging Workflow
+
+This system is **not static batch processing** — it is **continuous live operation** where logs flow through the system in real-time:
+
+```
+HARDWARE/SENSOR       PI SERVER          CLIENT SYSTEM
+─────────────────────────────────────────────────────────
+  Data Stream
+      │
+      ├──→ [Create log file 1]
+      │                              ←─ [Poll: GET_LOG?]
+      ├──→ [Create log file 2]       [Send log 1]
+      │                              [Delete log 1] ✓
+      ├──→ [Create log file 3]       ←─ [Poll: GET_LOG?]
+      │                              [Send log 2]
+      ├──→ [Create log file 4]       [Delete log 2] ✓
+      │                              ←─ [Poll: GET_LOG?]
+      └──→ [Queue: files 3,4,5...]   [Send log 3]
+                                     [Delete log 3] ✓
+```
+
+### Key Real-Time Characteristics
+
+**On the Pi Server:**
+- Logs are **continuously created** by data acquisition hardware (ADCs, high-speed digitizers, test benches)
+- Each log file is **temporarily queued** on disk (FIFO order)
+- Files are **immediately streamed** to client on request (`GET_LOG?`)
+- Files are **auto-deleted** after successful transfer (cleanup on confirmation)
+- If data creation outpaces client polling, queue **grows**; if client polls faster, queue **shrinks**
+
+**On the Client System:**
+- **Continuous polling** (e.g., every 250 ms) to request new logs
+- Receives logs **one-at-a-time** in FIFO order
+- **Persists** received data to local archive (`dump_log.log`)
+- Handles queue empty condition gracefully (`"no new data found"`)
+
+**System Backpressure Handling:**
+- **Fast producer, slow consumer**: Queue grows on Pi (disk fill risk)
+- **Slow producer, fast consumer**: Client polls frequently, gets `"no new data"` responses
+- **Balanced steady-state**: Queue size stabilizes; logs flow at data generation rate
 
 ---
 
@@ -322,19 +366,28 @@ python3 3raw_socket_speed_test.py
 
 ---
 
-## Level 4: Multi-File Queue Management
+## Level 4: Real-Time Multi-File Queue Management (Production)
 
 ### Files
 - **Server**: `4server_minimal_tcp_ip.py`
 - **Client**: `4client_minimal_tcp_ip.py`
 
 ### What It Does
-Implements **production-ready file queue management**:
-- Server pre-generates 3 × 1 MB log files on startup
-- Client continuously polls with `GET_LOG?`
-- Server sends oldest log file first (FIFO queue)
-- Server deletes file after successful transfer
-- Client appends all received logs to local `dump_log.log`
+Implements **production-ready real-time file queue management** for continuous live logging:
+- Server **continuously generates** new log files (simulating high-speed data acquisition hardware)
+- Client **continuously polls** with `GET_LOG?` at fixed intervals (e.g., every 250 ms)
+- Server sends **oldest log file first** (FIFO queue) on each request
+- Server **automatically deletes file** after successful transfer (queue cleanup)
+- Client **appends all received logs** to persistent archive (`dump_log.log`), building a complete time-series
+- System operates **indefinitely** as a live data pipeline — logs in, client processes, logs cleaned up
+
+### This Is Real-Time Dynamic Operation
+Unlike Level 3 (fixed 1 MB dummy data), Level 4 models **actual continuous hardware operation**:
+- Logs are **generated asynchronously** (hardware pace, not client pace)
+- Logs are **consumed** at a different rate (client polling interval)
+- Queue acts as **dynamic buffer** between producer and consumer
+- Files are **ephemeral** — they exist only briefly before deletion
+- System reaches **steady-state throughput** after startup (queue size stabilizes)
 
 ### New Features
 
@@ -408,11 +461,54 @@ ls -lh dump_log.log
 ```
 
 ### Key Production Features
-- **FIFO Queue**: Oldest files sent first
-- **Cleanup**: Deleted after successful transfer
-- **Continuous monitoring**: Client polling loop
-- **Persistent logging**: Accumulated to disk
-- **Error handling**: "no new data found" response when queue empty
+- **FIFO Queue**: Oldest files sent first (preserves chronological order)
+- **Auto-Cleanup**: Deleted immediately after successful transfer (no manual housekeeping)
+- **Continuous monitoring**: Client polling loop runs indefinitely
+- **Persistent logging**: Accumulated to disk as single growing archive
+- **Error handling**: "no new data found" response when queue empty (graceful backoff)
+- **Real-time backpressure**: Queue size grows/shrinks dynamically based on producer vs. consumer rates
+
+### Real-Time Queue Dynamics
+
+**Scenario 1: Fast Producer, Slow Consumer**
+```
+[t=0s]   Server creates: dlog_1, dlog_2, dlog_3
+[t=1s]   Client polls → gets dlog_1, deletes dlog_1
+[t=1.5s] Server creates: dlog_4, dlog_5, dlog_6
+[t=2s]   Client polls → gets dlog_2, deletes dlog_2
+[t=3s]   Server creates: dlog_7, dlog_8, dlog_9
+[t=3s]   Queue on Pi grows: [dlog_3, dlog_4, dlog_5, dlog_6, dlog_7, dlog_8, dlog_9]
+         → Disk fill risk if producer >> consumer
+```
+
+**Scenario 2: Slow Producer, Fast Consumer**
+```
+[t=0s]   Server creates: dlog_1
+[t=0.5s] Client polls → gets dlog_1, deletes dlog_1
+[t=0.7s] Client polls → queue empty → "no new data found"
+[t=1.0s] Client polls → queue empty → "no new data found"
+[t=2.0s] Server creates: dlog_2
+[t=2.2s] Client polls → gets dlog_2, deletes dlog_2
+         → Client time-samples the producer; some polls see empty queue
+```
+
+**Scenario 3: Balanced Steady-State**
+```
+[t=0-10s] Transient: queue fills/drains as system finds balance
+[t=10s+]  Steady-state: average files in queue stabilizes
+          → producer rate ≈ consumer rate
+          → each GET_LOG? finds ~1 file waiting
+          → latency from creation to delivery: ~1 polling interval
+```
+
+### Real-Time Implications for Level 4
+
+- **No data loss**: Files cannot be created and deleted faster than network can transfer (FIFO protection)
+- **Chronological integrity**: FIFO ensures logs arrive at client in creation order (timestamp preserved)
+- **Scalability**: Queue acts as shock absorber for rate mismatches (producer surge doesn't starve client)
+- **Latency**: Logs reach client within ~1 polling interval (e.g., 250 ms if polling every 250 ms)
+- **Reliability**: If client crashes, logs accumulate on Pi until reconnect (no data lost during downtime)
+- **Steady-state operation**: After initial transient, system reaches dynamic equilibrium where queue depth stabilizes
 
 ### Use Cases
 - Real-time test data capture (ATE systems)
@@ -588,8 +684,8 @@ async def continuous_monitor():
 |-------|---------|------------|----------|
 | **1** | Basic connectivity | Simple socket I/O | Learning, prototyping |
 | **2** | Command protocol | Newline-delimited parsing, PyVISA | Instrument integration |
-| **3** | Large data transfer | Binary streaming, performance | High-speed logging |
-| **4** | Production queue | File management, cleanup | Continuous data capture |
+| **3** | Large data transfer | Binary streaming, performance testing | Single-shot high-speed transfer |
+| **4** | **Real-Time Production Queue** | **FIFO auto-cleanup, dynamic queue depth, continuous polling** | **Live data logging, indefinite operation** |
 
 ---
 
@@ -604,11 +700,23 @@ async def continuous_monitor():
 
 ## Author Notes
 
-These examples were developed for **semiconductor test data transfer** (ATE, probe, wafer mapping), where **PyVISA compliance** and **high-speed binary I/O** are critical. The progression from Level 1→4 mirrors real-world deployment:
+These examples were developed for **real-time semiconductor test data transfer** (ATE, probe, wafer mapping, high-speed signal capture), where **continuous live logging**, **PyVISA compliance**, and **high-speed binary I/O** are critical.
 
-- **Level 1**: Proof-of-concept
-- **Level 2**: Integration with existing VISA instruments
-- **Level 3**: Performance validation
-- **Level 4**: Continuous, reliable production monitoring
+### Real-Time vs. Static: Key Difference
+- **Static/Batch**: Data exists before client connects; client downloads fixed artifacts
+- **Real-Time/Dynamic**: Data is **continuously created** by hardware; client **continuously polls** to drain queue; files are **ephemeral** (created and deleted in real-time)
 
-All code uses **minimal dependencies** (Python stdlib only on server) for maximum portability on resource-constrained SBCs.
+This project implements **dynamic real-time operation**: logs flow through the system, are processed, and cleaned up automatically—designed for indefinite sustained operation where producer (hardware) and consumer (client) operate at potentially different rates.
+
+### Deployment Progression
+The progression from Level 1→4 mirrors real-world deployment:
+- **Level 1**: Proof-of-concept (can I connect?)
+- **Level 2**: Integration with existing VISA instruments (does the protocol work?)
+- **Level 3**: Performance validation (how fast can data flow?)
+- **Level 4**: Continuous production monitoring (can it sustain operation indefinitely?)
+
+### Design Principles
+- **Minimal dependencies** (Python stdlib only on server) for maximum portability on resource-constrained SBCs
+- **FIFO queue protection** against data loss even when producer/consumer rates mismatch
+- **Asynchronous I/O** (hardware generates data independently; client polls independently)
+- **Persistent cleanup** (no manual housekeeping; files auto-delete after transfer)
