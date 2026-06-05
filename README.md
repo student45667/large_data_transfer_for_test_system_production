@@ -1,3 +1,5 @@
+   ![Datalog System Architecture](image_6358157f.png)
+
 # TCP/IP Real-Time High-Speed Data Transfer System: PI SBC to Data Acquisition Station
 
 ## Project Overview
