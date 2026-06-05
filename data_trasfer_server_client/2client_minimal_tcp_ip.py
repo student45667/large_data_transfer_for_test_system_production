@@ -1,0 +1,45 @@
+
+"""
+# minimal client py
+#!/usr/bin/env python3
+import socket
+
+s = socket.socket()
+s.connect(('127.0.0.1', 5025))
+s.send(b"*IDN?\n")
+print(s.recv(1024))
+s.close()
+"""
+
+
+
+
+# minimal VISA
+
+#!/usr/bin/env python3
+import pyvisa
+
+rm = pyvisa.ResourceManager()
+inst = rm.open_resource('TCPIP::raspi.local::5025::SOCKET')
+inst.write_termination = '\n'
+inst.read_termination = '\n'
+
+try:
+	while True:
+		response = inst.query('HOW ARE U ONE')
+		print (response)
+		response = inst.query('HOW ARE U TWO')
+		print (response)
+		response = inst.query('HOW ARE U THREE')
+		print (response)
+except KeyboardInterrupt:
+	print("closing...")
+
+inst.close()
+
+
+
+
+
+
+
