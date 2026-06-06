@@ -1,4 +1,4 @@
-![General System Architecture](image_6358157f.png)
+![General System Architecture](image1.png)
    
 ![Detailed System Architecture](image2.png)
 
