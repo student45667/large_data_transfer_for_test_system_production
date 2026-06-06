@@ -1,6 +1,6 @@
-   ![General System Architecture](image_6358157f.png)
+![General System Architecture](image_6358157f.png)
    
-    ![Detailed System Architecture](detailed_diagramm.png)
+![Detailed System Architecture](image2.png)
 
 # TCP/IP Real-Time High-Speed Data Transfer System: PI SBC to Data Acquisition Station
 
